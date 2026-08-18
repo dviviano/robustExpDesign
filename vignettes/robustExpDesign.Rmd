@@ -1,0 +1,355 @@
+---
+title: "Robust Experimental Design"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Robust Experimental Design}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  fig.width = 7,
+  fig.height = 5,
+  fig.align = "center"
+)
+```
+
+## Introduction
+
+The package `robustExpDesign` implements methods for designing experiments that will be combined with observational or external evidence. The external evidence may be biased, so the design problem balances statistical precision against sensitivity to misspecification.
+
+The package is designed for applications where the researcher has a target estimand, an initial set of external estimates, and a menu of possible experiments, treatment arms, sites, moments, or data sources. The output describes which experiments to run, how much sample to allocate to each selected experiment, and how to combine experimental and external evidence in the estimator.
+
+The typical workflow is:
+
+1. specify the target sensitivity vector `omega`, or a target-sensitivity matrix `Omega`;
+2. provide observational covariance information and experimental variance inputs;
+3. specify costs, experiment-count limits, and feasibility restrictions;
+4. solve the minimax proportional-regret design problem;
+5. inspect selected experiments, estimator weights, sample allocation, and regret components.
+
+## Reference
+
+This package implements methods from:
+
+Epanomeritakis, A., & Viviano, D. (2026). *Learning What to Learn: Experimental Design when Combining Experimental with Observational Evidence*. Manuscript, July 9, 2026.
+
+## Installation
+
+Install the development version from GitHub with:
+
+```{r, eval = FALSE}
+install.packages("remotes")
+remotes::install_github("ostasovskyi/robustExpDesign")
+```
+
+Load the package with:
+
+```{r, eval = FALSE}
+library(robustExpDesign)
+```
+
+Core utilities use `Matrix`, `rlang`, and `utils`.
+
+```{r, eval = FALSE}
+install.packages(c("Matrix", "rlang"))
+```
+
+The non-Gurobi baseline solver uses `quadprog`.
+
+```{r, eval = FALSE}
+install.packages("quadprog")
+```
+
+The moment-selection and audience-regret solvers use `CVXR`.
+
+```{r, eval = FALSE}
+install.packages("CVXR")
+```
+
+Gurobi is optional for the mixed-integer backend. After installing and licensing the Gurobi Optimizer, install its R package from the Gurobi installation directory.
+
+```{r, eval = FALSE}
+library(gurobi)
+```
+
+## Example workflow
+
+We first set up a small three-parameter problem. The target sensitivity vector is `omega`. The matrix `Sigma_obs` is the covariance matrix for the observational estimates. The vector `v2` contains experimental variance constants, so arm `j` has variance `v2[j] / n_j` when allocated sample size `n_j`.
+
+```{r, eval = FALSE}
+library(robustExpDesign)
+
+Sigma_obs <- matrix(
+  c(
+    0.08, 0.01, 0.00,
+    0.01, 0.05, 0.01,
+    0.00, 0.01, 0.09
+  ),
+  nrow = 3,
+  byrow = TRUE
+)
+
+v2 <- c(direct = 1.00, income = 1.40, wage = 1.10)
+omega <- c(direct = 0.40, income = 1.00, wage = -0.70)
+```
+
+We now solve the minimax proportional-regret design problem. The researcher can select at most two experiments, must select at least one experiment, and faces a per-unit cost of 1.5 for the wage experiment.
+
+```{r, eval = FALSE}
+fit <- solve_minimax_design(
+  Sigma_obs = Sigma_obs,
+  v2 = v2,
+  n_total = 500,
+  omega = omega,
+  costs = c(1, 1, 1.5),
+  bias_weights = c(1, 1, 1),
+  h = 2,
+  min_experiments = 1,
+  solver = "quadprog"
+)
+```
+
+After fitting, we can inspect the selected design and estimator.
+
+```{r, eval = FALSE}
+fit
+fit$selected
+fit$x_opt
+fit$gamma_opt
+fit$n_opt
+fit$alpha_ratio
+fit$beta_ratio
+fit$regret
+```
+
+The entry `x_opt` records which experiments are selected. The entry `gamma_opt` records shrinkage weights. The entry `n_opt` gives the cost-aware experimental sample allocation.
+
+## Objective components
+
+For a candidate design, the package evaluates
+
+```text
+max(variance regret, bias regret).
+```
+
+The variance-regret component compares the design's variance index with the smallest feasible variance index. The bias-regret component compares the design's worst-case bias exposure with the smallest feasible bias exposure.
+
+```{r, eval = FALSE}
+fit$alpha_opt
+fit$beta_opt
+fit$alpha_star
+fit$beta_star
+fit$alpha_ratio
+fit$beta_ratio
+fit$regret
+```
+
+A variance-optimal benchmark can be computed under the same feasibility restrictions.
+
+```{r, eval = FALSE}
+fit_var <- solve_variance_design(
+  Sigma_obs = Sigma_obs,
+  v2 = v2,
+  n_total = 500,
+  omega = omega,
+  costs = c(1, 1, 1.5),
+  h = 2,
+  min_experiments = 1,
+  solver = "quadprog"
+)
+
+fit_var$selected
+fit_var$n_opt
+fit_var$regret
+```
+
+## Weighted bias radii
+
+The package supports weighted ambiguity sets for observational bias. Passing `bias_weights` implements coordinate-specific bounds of the form
+
+```text
+|b_j| <= bias_weights[j] * B.
+```
+
+The aliases `kappa` and `k` are also accepted. These aliases are useful when matching notation in scripts and equations.
+
+```{r, eval = FALSE}
+fit_weighted <- solve_minimax_design(
+  Sigma_obs = Sigma_obs,
+  v2 = v2,
+  n_total = 500,
+  omega = omega,
+  costs = c(1, 1, 1.5),
+  kappa = c(1.0, 0.5, 2.0),
+  h = 2,
+  min_experiments = 1,
+  solver = "quadprog"
+)
+
+fit_weighted$beta_opt
+fit_weighted$regret
+```
+
+## Feasibility restrictions
+
+The feasible experiment set can be restricted with `h`, `min_experiments`, `x_max`, explicit `feasible_sets`, or linear `selection_constraints`.
+
+```{r, eval = FALSE}
+selection_constraints <- list(
+  A = matrix(c(1, 1, 0), nrow = 1),
+  sense = "<=",
+  rhs = 1
+)
+
+fit_restricted <- solve_minimax_design(
+  Sigma_obs = Sigma_obs,
+  v2 = v2,
+  n_total = 500,
+  omega = omega,
+  costs = c(1, 1, 1.5),
+  h = 2,
+  x_max = c(1, 1, 1),
+  selection_constraints = selection_constraints,
+  min_experiments = 1,
+  solver = "quadprog"
+)
+
+fit_restricted$selected
+fit_restricted$n_opt
+```
+
+## Budget sweeps
+
+`sweep_n_total()` runs the design solvers over a grid of budgets and experiment-count limits. It returns arm-level allocation and shrinkage rows, one regret row for each solver run, and optional plots.
+
+```{r, eval = FALSE}
+sweep <- sweep_n_total(
+  Sigma_obs = Sigma_obs,
+  v2 = v2,
+  omega = omega,
+  n_grid = c(200, 300, 400, 500, 750, 1000),
+  h_values = c(1, 2),
+  costs = c(1, 1, 1.5),
+  experiment_names = c("Direct", "Income", "Wage"),
+  include_variance_design = TRUE,
+  make_plots = TRUE,
+  solver = "quadprog"
+)
+
+head(sweep$data$arms)
+head(sweep$data$regret)
+sweep$plots$allocation
+sweep$plots$regret
+```
+
+## Moment selection and GMM weights
+
+The moment-selection routines are for settings where the researcher wants to combine several moments, instruments, sites, outcomes, or data sources. Some moments may be reliable, while others may be useful but potentially biased.
+
+The main function is `solve_moment_design()`. The user provides `Lambda`, the moment Jacobian; `Sigma`, the covariance matrix of the moments; and `omega` or `Omega`, which describes how the target estimand depends on structural parameters.
+
+### Fixed weighting matrix
+
+Use `solve_moment_design(..., optimize_W = FALSE)` to evaluate a supplied GMM weighting matrix.
+
+```{r, eval = FALSE}
+Lambda <- matrix(
+  c(
+    1.0, 0.0,
+    0.0, 1.0,
+    1.0, 0.5,
+    0.5, 1.0
+  ),
+  nrow = 4,
+  byrow = TRUE,
+  dimnames = list(
+    c("exp_direct", "exp_income", "obs_joint", "obs_aux"),
+    c("theta_direct", "theta_income")
+  )
+)
+
+Sigma_mom <- diag(c(0.05, 0.06, 0.10, 0.12))
+Omega <- matrix(c(0.4, 1.0), nrow = 1)
+W <- diag(4)
+
+eval_fixed <- solve_moment_design(
+  Lambda = Lambda,
+  Sigma = Sigma_mom,
+  Omega = Omega,
+  W = W,
+  biased_moments = c(3, 4),
+  norm = "l2",
+  optimize_W = FALSE
+)
+
+eval_fixed$alpha
+eval_fixed$beta
+```
+
+### Optimizing over moment sets
+
+Use `optimize_W = TRUE` to optimize over the first-order linear estimator implied by selected moments. Candidate moment sets or masks define the admissible moment menus.
+
+```{r, eval = FALSE}
+fit_moments <- solve_moment_design(
+  Lambda = Lambda,
+  Sigma = Sigma_mom,
+  Omega = Omega,
+  biased_moments = c(3, 4),
+  bias_weights = c(0, 0, 1, 1.5),
+  norm = "linf",
+  moment_sets = list(c(1, 2, 3), c(1, 2, 4), c(1, 2, 3, 4)),
+  optimize_W = TRUE,
+  cvxr_solver = "CLARABEL"
+)
+
+fit_moments$selected_candidate
+fit_moments$alpha_ratio
+fit_moments$beta_ratio
+fit_moments$regret
+```
+
+## Audience-regret designs
+
+`solve_audience_design()` solves the audience-regret objective over a supplied grid of bias radii `B_grid`. The function computes oracle benchmarks at each grid value and then selects one experiment set and one sample allocation that control regret across the grid.
+
+```{r, eval = FALSE}
+fit_audience <- solve_audience_design(
+  Sigma_obs = Sigma_obs,
+  v2 = v2,
+  n_total = 500,
+  omega = omega,
+  B_grid = c(0, 0.25, 0.5, 1, 2),
+  costs = c(1, 1, 1.5),
+  kappa = c(1, 1, 1),
+  h = 2,
+  min_experiments = 1,
+  cvxr_solver = "CLARABEL"
+)
+
+fit_audience
+fit_audience$n_opt
+fit_audience$posterior_ratio
+fit_audience$beta_ratio_large_B
+```
+
+For general linear reported statistics, pass `Lambda_obs` and `Lambda_exp`. The function then imposes the calibration constraint implied by those loading matrices.
+
+## Function map
+
+The main user-facing functions are:
+
+```{r, eval = FALSE}
+solve_minimax_design()
+solve_variance_design()
+evaluate_design()
+sweep_n_total()
+solve_moment_design()
+solve_audience_design()
+```
+
+`solve_minimax_design()` is the main experiment-selection function. `solve_variance_design()` computes a variance-optimal benchmark. `evaluate_design()` evaluates a user-supplied design. `sweep_n_total()` runs budget and experiment-count sweeps. `solve_moment_design()` handles moment-based designs and GMM estimators. `solve_audience_design()` handles grid-based audience-regret designs.

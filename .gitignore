@@ -1,0 +1,10 @@
+.Rhistory
+.RData
+.Ruserdata
+.Rproj.user
+*.Rcheck
+*.tar.gz
+.DS_Store
+Thumbs.db
+/doc/
+/Meta/

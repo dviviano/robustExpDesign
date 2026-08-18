@@ -1,0 +1,35 @@
+Package: robustExpDesign
+Title: Robust Experimental Design with Observational Evidence
+Version: 0.1.0
+Authors@R: c(
+    person("Aristotelis", "Epanomeritakis", role = "aut"),
+    person("Davide", "Viviano", role = "aut"),
+    person("Oleksandr", "Stasovskyi", email = "ostasovskyi@college.harvard.edu", role = c("cre", "ctb"))
+    )
+Description: Implements tools for designing experiments that combine
+    experimental evidence with observational or external evidence under
+    misspecification. The package provides minimax proportional-regret
+    experiment selection, variance benchmarks, budget sweeps, moment-selection
+    routines, audience-regret designs over bias-radius grids, and diagnostic
+    helpers for sample allocation and estimator weights.
+License: file LICENSE
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 8.0.0
+Depends:
+    R (>= 4.1.0)
+Imports:
+    Matrix,
+    rlang,
+    utils
+Suggests:
+    CVXR,
+    ggplot2,
+    gurobi,
+    quadprog,
+    knitr,
+    rmarkdown,
+    testthat (>= 3.0.0)
+VignetteBuilder: knitr
+Config/testthat/edition: 3
+Config/roxygen2/version: 8.0.0
