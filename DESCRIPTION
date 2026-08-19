@@ -6,30 +6,31 @@ Authors@R: c(
     person("Davide", "Viviano", role = "aut"),
     person("Oleksandr", "Stasovskyi", email = "ostasovskyi@college.harvard.edu", role = c("cre", "ctb"))
     )
-Description: Implements tools for designing experiments that combine
+Description: Provides tools for designing experiments that combine
     experimental evidence with observational or external evidence under
-    misspecification. The package provides minimax proportional-regret
-    experiment selection, variance benchmarks, budget sweeps, moment-selection
-    routines, audience-regret designs over bias-radius grids, and diagnostic
-    helpers for sample allocation and estimator weights.
+    potential misspecification. Implements minimax proportional-regret
+    experiment selection, variance-optimal benchmarks, budget sweeps,
+    moment-selection and GMM weighting routines, finite-grid audience-regret
+    designs, and diagnostics for sample allocation and estimator weights.
 License: file LICENSE
 Encoding: UTF-8
-Roxygen: list(markdown = TRUE)
-RoxygenNote: 8.0.0
+LazyData: false
 Depends:
     R (>= 4.1.0)
 Imports:
     Matrix,
+    parallel,
     rlang,
     utils
 Suggests:
     CVXR,
     ggplot2,
-    gurobi,
-    quadprog,
     knitr,
+    quadprog,
     rmarkdown,
     testthat (>= 3.0.0)
+Enhances:
+    gurobi
 VignetteBuilder: knitr
 Config/testthat/edition: 3
-Config/roxygen2/version: 8.0.0
+Config/roxygen2/version: 8.1.0

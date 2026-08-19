@@ -16,6 +16,11 @@
 #' @param plot_total_n Logical. If `TRUE`, allocation plots use `n_opt`; otherwise
 #'   they use the allocation share among selected experiments.
 #' @param n_cores Integer number of cores for non-Windows parallel execution.
+#' @param zero_tol Relative tolerance for homogeneous zero-risk diagnostics.
+#' @param psd_tol Relative covariance eigenvalue tolerance.
+#' @param psd_action Either `"error"` or `"project"`. Corrections beyond
+#'   floating-point roundoff require explicit `"project"`; projections are
+#'   reported in fitted objects.
 #'
 #' @return A list with `data`, `plots`, and `fits`.
 #' @export
@@ -31,33 +36,53 @@ sweep_n_total <- function(Sigma_obs,
                           feasible_sets = NULL,
                           selection_constraints = NULL,
                           min_experiments = 0L,
+                          n_min = 0,
                           gamma_lower = NULL,
                           gamma_upper = NULL,
+                          a_exp_lower = NULL,
+                          a_exp_upper = NULL,
+                          force_gamma_unit_interval = TRUE,
                           experiment_names = NULL,
                           include_variance_design = TRUE,
                           make_plots = TRUE,
                           plot_total_n = FALSE,
                           n_cores = 1L,
-                          solver = c("auto", "gurobi", "quadprog"),
+                          solver = base::c("auto", "gurobi", "quadprog"),
                           gurobi_params = list(),
                           max_sets = 200000L,
                           tol_bisect = 1e-7,
                           bisect_iter = 80L,
                           qp_ridge = 1e-10,
+                          zero_tol = 1e-9,
+                          psd_tol = 1e-10,
+                          psd_action = base::c("error", "project"),
                           c = NULL,
-                          k = NULL,
-                          kappa = NULL) {
+                          k = NULL) {
   n_grid <- as.numeric(n_grid)
   if (length(n_grid) == 0L || any(!is.finite(n_grid)) || any(n_grid <= 0)) {
     stop("n_grid must contain positive finite values.", call. = FALSE)
   }
-  h_values <- as.integer(h_values)
-  if (length(h_values) == 0L || any(is.na(h_values)) || any(h_values < 0)) {
+  n_min <- as.numeric(n_min)
+  if (!(length(n_min) %in% base::c(1L, length(n_grid))) ||
+      any(!is.finite(n_min)) || any(n_min < 0)) {
+    stop("n_min must be a nonnegative finite scalar or have length equal to n_grid.",
+         call. = FALSE)
+  }
+  n_min_grid <- if (length(n_min) == 1L) rep(n_min, length(n_grid)) else n_min
+  h_values_raw <- as.numeric(h_values)
+  if (length(h_values_raw) == 0L || any(!is.finite(h_values_raw)) ||
+      any(abs(h_values_raw - round(h_values_raw)) > 1e-9) ||
+      any(h_values_raw < 0)) {
     stop("h_values must contain nonnegative integers.", call. = FALSE)
   }
+  h_values <- as.integer(round(h_values_raw))
 
   solver <- match.arg(solver)
+  psd_action <- match.arg(psd_action)
   p <- length(omega)
+  if (any(h_values > p)) {
+    stop("h_values cannot exceed length(omega).", call. = FALSE)
+  }
   if (is.null(experiment_names)) {
     experiment_names <- names(omega)
   }
@@ -72,13 +97,18 @@ sweep_n_total <- function(Sigma_obs,
   if (isTRUE(include_variance_design)) {
     methods <- base::c(methods, "variance")
   }
+  # Keep an explicit index so repeated n_grid values can carry distinct n_min
+  # values instead of being collapsed by match().
   tasks <- expand.grid(
-    n_total = n_grid,
+    n_index = seq_along(n_grid),
     h = h_values,
     method = methods,
     KEEP.OUT.ATTRS = FALSE,
     stringsAsFactors = FALSE
   )
+  tasks$n_total <- n_grid[tasks$n_index]
+  tasks$n_min <- n_min_grid[tasks$n_index]
+  tasks$task_id <- seq_len(nrow(tasks))
 
   run_one <- function(i) {
     task <- tasks[i, ]
@@ -94,15 +124,21 @@ sweep_n_total <- function(Sigma_obs,
       feasible_sets = feasible_sets,
       selection_constraints = selection_constraints,
       min_experiments = min_experiments,
+      n_min = task$n_min,
       gamma_lower = gamma_lower,
       gamma_upper = gamma_upper,
+      a_exp_lower = a_exp_lower,
+      a_exp_upper = a_exp_upper,
+      force_gamma_unit_interval = force_gamma_unit_interval,
       solver = solver,
       gurobi_params = gurobi_params,
       max_sets = max_sets,
       qp_ridge = qp_ridge,
+      zero_tol = zero_tol,
+      psd_tol = psd_tol,
+      psd_action = psd_action,
       c = c,
-      k = k,
-      kappa = kappa
+      k = k
     )
     fit <- if (identical(task$method, "minimax")) {
       common$tol_bisect <- tol_bisect
@@ -112,8 +148,13 @@ sweep_n_total <- function(Sigma_obs,
       do.call(solve_variance_design, common)
     }
     total_alloc <- sum(fit$n_opt)
+    total_budget_used <- sum(as.numeric(fit$n_opt) *
+                             as.numeric(fit$inputs$costs))
     arms <- data.frame(
+      task_id = task$task_id,
+      n_index = task$n_index,
       n_total = task$n_total,
+      n_min = task$n_min,
       h = task$h,
       method = task$method,
       solver = fit$solver,
@@ -121,12 +162,28 @@ sweep_n_total <- function(Sigma_obs,
       x = as.numeric(fit$x_opt),
       gamma = as.numeric(fit$gamma_opt),
       s = as.numeric(fit$s_opt),
+      a_exp = if (!is.null(fit$a_exp_opt)) as.numeric(fit$a_exp_opt) else rep(NA_real_, p),
+      a_obs = if (!is.null(fit$a_obs_opt)) as.numeric(fit$a_obs_opt) else rep(NA_real_, p),
       n_opt = as.numeric(fit$n_opt),
-      n_share = if (total_alloc > 0) as.numeric(fit$n_opt) / total_alloc else rep(0, p),
+      n_share = if (total_alloc > 0) {
+        as.numeric(fit$n_opt) / total_alloc
+      } else {
+        rep(0, p)
+      },
+      budget_used = as.numeric(fit$n_opt) * as.numeric(fit$inputs$costs),
+      budget_share = if (total_budget_used > 0) {
+        as.numeric(fit$n_opt) * as.numeric(fit$inputs$costs) /
+          total_budget_used
+      } else {
+        rep(0, p)
+      },
       stringsAsFactors = FALSE
     )
     regret <- data.frame(
+      task_id = task$task_id,
+      n_index = task$n_index,
       n_total = task$n_total,
+      n_min = task$n_min,
       h = task$h,
       method = task$method,
       solver = fit$solver,
@@ -208,11 +265,11 @@ sweep_n_total <- function(Sigma_obs,
     ggplot2::theme_minimal()
 
   regret_long <- rbind(
-    data.frame(regret[, c("n_total", "h", "method")], component = "alpha_ratio",
+    data.frame(regret[, base::c("n_total", "h", "method")], component = "alpha_ratio",
                value = regret$alpha_ratio, stringsAsFactors = FALSE),
-    data.frame(regret[, c("n_total", "h", "method")], component = "beta_ratio",
+    data.frame(regret[, base::c("n_total", "h", "method")], component = "beta_ratio",
                value = regret$beta_ratio, stringsAsFactors = FALSE),
-    data.frame(regret[, c("n_total", "h", "method")], component = "regret",
+    data.frame(regret[, base::c("n_total", "h", "method")], component = "regret",
                value = regret$regret, stringsAsFactors = FALSE)
   )
 
@@ -237,9 +294,9 @@ sweep_n_total <- function(Sigma_obs,
 #' Sweep total sample size and create design plots
 #'
 #' @description
-#' Compatibility wrapper around [sweep_n_total()]. This function name is retained
-#' for scripts using the Gurobi-only API while the `solver` argument
-#' also allows non-Gurobi execution.
+#' Compatibility wrapper around [sweep_n_total()]. The old function name is kept
+#' for scripts that used the original Gurobi-only API, but the `solver` argument
+#' now allows non-Gurobi execution.
 #'
 #' @inheritParams solve_minimax_design
 #' @param n_grid Numeric vector of positive budget values.
@@ -250,7 +307,6 @@ sweep_n_total <- function(Sigma_obs,
 #' @param experiment_names Optional labels.
 #' @param plot_total_n Logical. If `TRUE`, plot allocation levels rather than
 #'   allocation shares.
-#' @param k Alias for `bias_weights`, included for script compatibility.
 #'
 #' @return Output from [sweep_n_total()].
 #' @export
@@ -265,7 +321,7 @@ sweep_n_tot_and_plot_gurobi <- function(Sigma_obs,
                                         h_single = 1L,
                                         BO_experiments = TRUE,
                                         ncor = 1L,
-                                        solver = c("auto", "gurobi", "quadprog"),
+                                        solver = base::c("auto", "gurobi", "quadprog"),
                                         gurobi_params = list(),
                                         max_sets = 200000L,
                                         experiment_names = NULL,
@@ -273,8 +329,18 @@ sweep_n_tot_and_plot_gurobi <- function(Sigma_obs,
                                         feasible_sets = NULL,
                                         selection_constraints = NULL,
                                         min_experiments = 0L,
+                                        n_min = 0,
                                         gamma_lower = NULL,
                                         gamma_upper = NULL,
+                                        a_exp_lower = NULL,
+                                        a_exp_upper = NULL,
+                                        force_gamma_unit_interval = TRUE,
+                                        tol_bisect = 1e-7,
+                                        bisect_iter = 80L,
+                                        qp_ridge = 1e-10,
+                                        zero_tol = 1e-9,
+                                        psd_tol = 1e-10,
+                                        psd_action = base::c("error", "project"),
                                         c = NULL,
                                         k = NULL) {
   h_values <- h_single
@@ -293,8 +359,12 @@ sweep_n_tot_and_plot_gurobi <- function(Sigma_obs,
     feasible_sets = feasible_sets,
     selection_constraints = selection_constraints,
     min_experiments = min_experiments,
+    n_min = n_min,
     gamma_lower = gamma_lower,
     gamma_upper = gamma_upper,
+    a_exp_lower = a_exp_lower,
+    a_exp_upper = a_exp_upper,
+    force_gamma_unit_interval = force_gamma_unit_interval,
     experiment_names = experiment_names,
     include_variance_design = FALSE,
     make_plots = TRUE,
@@ -303,6 +373,12 @@ sweep_n_tot_and_plot_gurobi <- function(Sigma_obs,
     solver = solver,
     gurobi_params = gurobi_params,
     max_sets = max_sets,
+    tol_bisect = tol_bisect,
+    bisect_iter = bisect_iter,
+    qp_ridge = qp_ridge,
+    zero_tol = zero_tol,
+    psd_tol = psd_tol,
+    psd_action = psd_action,
     c = c,
     k = k
   )

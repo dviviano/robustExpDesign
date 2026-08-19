@@ -1,4 +1,5 @@
-^fairpolicy\.Rproj$
-^\.Rproj\.user$
-^doc$
-^Meta$
+^patch_.*[.]py$
+^static_r_check[.]py$
+^validation_.*$
+^\.git$
+^\.github$

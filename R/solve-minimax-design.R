@@ -2,7 +2,9 @@
 #'
 #' @description
 #' `solve_minimax_design()` implements the baseline optimization routine in
-#' Algorithm 1 of Epanomeritakis and Viviano (2025). It chooses experiment
+#' Algorithm 1 of Epanomeritakis and Viviano (2026) for the identity-loading
+#' specialization, where each experimental estimate targets the corresponding
+#' coordinate observed externally. It chooses experiment
 #' indicators `x`, shrinkage weights `gamma`, and cost-aware sample allocation
 #' `n_opt` that minimize the maximum of the normalized variance and bias
 #' components.
@@ -40,9 +42,22 @@
 #'   `">="`, `"<"`, `">"`, or `"="`.
 #' @param min_experiments Integer lower bound on the number of selected
 #'   experiments. Defaults to zero.
+#' @param n_min Optional nonnegative lower bound on the sample size allocated to
+#'   each selected experiment. Defaults to zero, which preserves the profiled
+#'   Neyman-allocation implementation.
 #' @param gamma_lower,gamma_upper Optional length-`p` vectors giving coordinate
 #'   bounds on `gamma`. Defaults are zero and one. Set both to one to use only
-#'   experimental estimates when selected.
+#'   experimental estimates when selected. When `force_gamma_unit_interval =
+#'   FALSE` and `a_exp_lower`/`a_exp_upper` are not supplied, these bounds are
+#'   translated into direct experimental weight bounds through `a_exp = omega *
+#'   gamma`.
+#' @param a_exp_lower,a_exp_upper Optional length-`p` vectors giving direct lower
+#'   and upper bounds for experimental linear weights in the general
+#'   identity-Lambda formulation used when `force_gamma_unit_interval = FALSE`.
+#' @param force_gamma_unit_interval Logical. If `TRUE`, require
+#'   `0 <= gamma_lower <= gamma_upper <= 1`, preserving the original shrinkage
+#'   interpretation. If `FALSE`, solve the general identity-Lambda linear-weight
+#'   formulation over `a_exp`; this currently requires Gurobi.
 #' @param solver One of `"auto"`, `"gurobi"`, or `"quadprog"`. `"quadprog"` avoids
 #'   Gurobi by enumerating feasible experiment sets and solving the convex
 #'   continuous subproblems with `quadprog`.
@@ -52,11 +67,18 @@
 #'   using the non-Gurobi solver.
 #' @param tol_bisect,bisect_iter Controls for the bisection used by the non-Gurobi
 #'   minimax solver.
-#' @param qp_ridge Small ridge added to quadratic-program Hessians for numerical
-#'   positive-definiteness in `quadprog`.
+#' @param qp_ridge Relative, dimensionless ridge added after normalizing the
+#'   quadratic-program objective. This preserves target-unit invariance while
+#'   ensuring positive-definiteness for `quadprog`.
+#' @param zero_tol Relative tolerance used only to recognize a mathematically
+#'   zero bias oracle. It is applied against a homogeneous bias scale.
+#' @param psd_tol Relative eigenvalue tolerance for covariance validation.
+#' @param psd_action Either `"error"` or `"project"`. Corrections beyond
+#'   floating-point roundoff require explicit `"project"`; every projection is
+#'   reported in the fitted object.
 #' @param tol Numeric tolerance used for diagnostic warnings.
 #' @param c Alias for `costs`, included for script compatibility.
-#' @param k,kappa Aliases for `bias_weights`, included for script compatibility.
+#' @param k Alias for `bias_weights`, included for script compatibility.
 #'
 #' @return An object of class `minimax_design`.
 #' @export
@@ -71,18 +93,24 @@ solve_minimax_design <- function(Sigma_obs,
                                  feasible_sets = NULL,
                                  selection_constraints = NULL,
                                  min_experiments = 0L,
+                                 n_min = 0,
                                  gamma_lower = NULL,
                                  gamma_upper = NULL,
-                                 solver = c("auto", "gurobi", "quadprog"),
+                                 a_exp_lower = NULL,
+                                 a_exp_upper = NULL,
+                                 force_gamma_unit_interval = TRUE,
+                                 solver = base::c("auto", "gurobi", "quadprog"),
                                  gurobi_params = list(),
                                  max_sets = 200000L,
                                  tol_bisect = 1e-7,
                                  bisect_iter = 80L,
                                  qp_ridge = 1e-10,
+                                 zero_tol = 1e-9,
+                                 psd_tol = 1e-10,
+                                 psd_action = base::c("error", "project"),
                                  tol = 1e-6,
                                  c = NULL,
-                                 k = NULL,
-                                 kappa = NULL) {
+                                 k = NULL) {
   prep <- .prepare_minimax_problem(
     Sigma_obs = Sigma_obs,
     v2 = v2,
@@ -95,16 +123,39 @@ solve_minimax_design <- function(Sigma_obs,
     feasible_sets = feasible_sets,
     selection_constraints = selection_constraints,
     min_experiments = min_experiments,
+    n_min = n_min,
     gamma_lower = gamma_lower,
     gamma_upper = gamma_upper,
+    a_exp_lower = a_exp_lower,
+    a_exp_upper = a_exp_upper,
+    force_gamma_unit_interval = force_gamma_unit_interval,
     costs_alias = c,
     bias_weights_alias = k,
-    kappa_alias = kappa
+    zero_tol = zero_tol,
+    psd_tol = psd_tol,
+    psd_action = psd_action
   )
 
   solver <- .choose_baseline_solver(solver)
+  if (identical(prep$weight_mode, "a") && !identical(solver, "gurobi")) {
+    stop("The direct a-weight formulation with force_gamma_unit_interval = FALSE currently requires solver = 'gurobi'.",
+         call. = FALSE)
+  }
+  if (prep$n_min > 0 && !identical(solver, "gurobi")) {
+    stop("n_min > 0 currently requires solver = 'gurobi'.", call. = FALSE)
+  }
 
-  if (identical(solver, "gurobi")) {
+  if (prep$n_min > 0) {
+    alpha_oracle <- .solve_alpha_oracle_explicit_alloc(prep, gurobi_params)
+    beta_oracle <- .solve_beta_oracle_explicit_alloc(prep, gurobi_params)
+  } else if (identical(prep$weight_mode, "a")) {
+    alpha_oracle <- if (prep$use_sets) {
+      .solve_alpha_oracle_a_sets(prep, gurobi_params)
+    } else {
+      .solve_alpha_oracle_a(prep, gurobi_params)
+    }
+    beta_oracle <- .solve_beta_oracle_a(prep, gurobi_params)
+  } else if (identical(solver, "gurobi")) {
     alpha_oracle <- .solve_alpha_oracle(prep, gurobi_params)
     beta_oracle <- .solve_beta_oracle(prep, gurobi_params)
   } else {
@@ -114,13 +165,27 @@ solve_minimax_design <- function(Sigma_obs,
   }
   alpha_star <- alpha_oracle$alpha
   beta_star <- beta_oracle$beta
+  beta_zero <- .beta_zero_feasible(prep, beta_oracle$x)
+  prep$beta_zero <- beta_zero
+  if (beta_zero) {
+    beta_star <- 0
+    beta_oracle$beta <- 0
+  }
 
   if (!is.finite(alpha_star) || alpha_star <= 0) {
     stop("The variance oracle returned a nonpositive value. Check Sigma_obs and v2.",
          call. = FALSE)
   }
 
-  minimax <- if (identical(solver, "gurobi")) {
+  minimax <- if (prep$n_min > 0) {
+    .solve_minimax_explicit_alloc(prep, alpha_star, beta_star, gurobi_params)
+  } else if (identical(prep$weight_mode, "a")) {
+    if (prep$use_sets) {
+      .solve_minimax_a_sets(prep, alpha_star, beta_star, gurobi_params)
+    } else {
+      .solve_minimax_a_miqcp(prep, alpha_star, beta_star, gurobi_params)
+    }
+  } else if (identical(solver, "gurobi")) {
     .solve_minimax_miqcp(prep, alpha_star, beta_star, gurobi_params)
   } else {
     .solve_minimax_enum(
@@ -138,39 +203,68 @@ solve_minimax_design <- function(Sigma_obs,
             call. = FALSE)
   }
 
-  n_opt <- prep$compute_allocation(minimax$s)
+  solution_weight <- if (identical(prep$weight_mode, "a")) minimax$a_exp else minimax$s
+  n_opt <- if (!is.null(minimax$n)) {
+    minimax$n
+  } else {
+    prep$compute_allocation(solution_weight, x = minimax$x)
+  }
   names_out <- prep$arm_names
+  minimax_a_exp <- if (is.null(minimax$a_exp)) prep$omega * minimax$s else minimax$a_exp
+  minimax_a_obs <- if (is.null(minimax$a_obs)) prep$omega * (1 - minimax$s) else minimax$a_obs
+  alpha_a_exp <- if (is.null(alpha_oracle$a_exp)) prep$omega * alpha_oracle$s else alpha_oracle$a_exp
+  alpha_a_obs <- if (is.null(alpha_oracle$a_obs)) prep$omega * (1 - alpha_oracle$s) else alpha_oracle$a_obs
+  beta_a_exp <- if (is.null(beta_oracle$a_exp)) prep$omega * beta_oracle$s else beta_oracle$a_exp
+  beta_a_obs <- if (is.null(beta_oracle$a_obs)) prep$omega * (1 - beta_oracle$s) else beta_oracle$a_obs
+  target_scale <- prep$target_scale
+  risk_rescale <- prep$risk_rescale
 
   out <- list(
     selected = prep$arm_names[which(minimax$x == 1L)],
     x_opt = .make_named(minimax$x, names_out),
     gamma_opt = .make_named(minimax$gamma, names_out),
     s_opt = .make_named(minimax$s, names_out),
+    a_exp_opt = .make_named(minimax_a_exp * target_scale, names_out),
+    a_obs_opt = .make_named(minimax_a_obs * target_scale, names_out),
     n_opt = .make_named(n_opt, names_out),
-    alpha_opt = minimax$alpha,
-    beta_opt = minimax$beta,
-    alpha_star = alpha_star,
-    beta_star = beta_star,
+    alpha_opt = minimax$alpha * risk_rescale,
+    beta_opt = minimax$beta * risk_rescale,
+    alpha_star = alpha_star * risk_rescale,
+    beta_star = beta_star * risk_rescale,
     alpha_ratio = minimax$alpha_ratio,
     beta_ratio = minimax$beta_ratio,
     regret = minimax$regret,
     t_opt = minimax$t,
+    solver_t_opt = if (is.null(minimax$solver_t)) minimax$t else minimax$solver_t,
     solver = solver,
+    weight_mode = prep$weight_mode,
+    beta_zero = beta_zero,
+    psd_diagnostics = prep$psd_diagnostics,
     alpha_oracle = list(
       x = .make_named(alpha_oracle$x, names_out),
       gamma = .make_named(alpha_oracle$gamma, names_out),
       s = .make_named(alpha_oracle$s, names_out),
-      n = .make_named(prep$compute_allocation(alpha_oracle$s), names_out),
-      alpha = alpha_oracle$alpha,
-      beta = alpha_oracle$beta
+      a_exp = .make_named(alpha_a_exp * target_scale, names_out),
+      a_obs = .make_named(alpha_a_obs * target_scale, names_out),
+      n = .make_named(if (!is.null(alpha_oracle$n)) alpha_oracle$n else prep$compute_allocation(
+        if (identical(prep$weight_mode, "a")) alpha_a_exp else alpha_oracle$s,
+        x = alpha_oracle$x
+      ), names_out),
+      alpha = alpha_oracle$alpha * risk_rescale,
+      beta = alpha_oracle$beta * risk_rescale
     ),
     beta_oracle = list(
       x = .make_named(beta_oracle$x, names_out),
       gamma = .make_named(beta_oracle$gamma, names_out),
       s = .make_named(beta_oracle$s, names_out),
-      n = .make_named(prep$compute_allocation(beta_oracle$s), names_out),
-      alpha = beta_oracle$alpha,
-      beta = beta_oracle$beta
+      a_exp = .make_named(beta_a_exp * target_scale, names_out),
+      a_obs = .make_named(beta_a_obs * target_scale, names_out),
+      n = .make_named(if (!is.null(beta_oracle$n)) beta_oracle$n else prep$compute_allocation(
+        if (identical(prep$weight_mode, "a")) beta_a_exp else beta_oracle$s,
+        x = beta_oracle$x
+      ), names_out),
+      alpha = beta_oracle$alpha * risk_rescale,
+      beta = beta_oracle$beta * risk_rescale
     ),
     feasible_sets_used = if (prep$use_sets) prep$sets else NULL,
     optimizer_result = minimax$result,
@@ -179,13 +273,24 @@ solve_minimax_design <- function(Sigma_obs,
       Sigma_obs = prep$Sigma_obs,
       v2 = prep$v2,
       n_total = prep$n_total,
-      omega = .make_named(prep$omega, names_out),
+      omega = .make_named(prep$omega_original, names_out),
       costs = .make_named(prep$costs, names_out),
       bias_weights = .make_named(prep$bias_weights, names_out),
       h = prep$h,
       min_experiments = prep$min_experiments,
+      n_min = prep$n_min,
       gamma_lower = .make_named(prep$gamma_lower, names_out),
-      gamma_upper = .make_named(prep$gamma_upper, names_out)
+      gamma_upper = .make_named(prep$gamma_upper, names_out),
+      a_exp_lower = .make_named(prep$a_exp_lower * target_scale, names_out),
+      a_exp_upper = .make_named(prep$a_exp_upper * target_scale, names_out),
+      weight_mode = prep$weight_mode,
+      force_gamma_unit_interval = prep$force_gamma_unit_interval,
+      zero_tol = prep$zero_tol,
+      psd_tol = prep$psd_tol,
+      psd_action = prep$psd_action,
+      psd_diagnostics = prep$psd_diagnostics,
+      loading_structure = "identity",
+      internal_target_scale = target_scale
     )
   )
   class(out) <- base::c("minimax_design", "list")
