@@ -1,5 +1,8 @@
-^patch_.*[.]py$
-^static_r_check[.]py$
-^validation_.*$
-^\.git$
+^.*\.Rproj$
+^\.Rproj\.user$
 ^\.github$
+^README\.Rmd$
+^data-raw$
+^cran-comments\.md$
+^_pkgdown\.yml$
+^pkgdown$
